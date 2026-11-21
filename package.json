@@ -1,6 +1,6 @@
 {
   "name": "pebble-universal-ai-plugin",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "Eric McCormick",
   "pebble": {
     "displayName": "Universal AI",
@@ -23,6 +23,11 @@
             "api.meta.ai"
           ]
         }
+      },
+      {
+        "name": "Internet",
+        "reason": "Send prompts to your custom AI endpoint",
+        "required": false
       }
     ],
     "plugin": {
@@ -278,6 +283,6 @@
         }
       ]
     },
-    "version": "0.1.1"
+    "version": "0.2.0"
   }
 }

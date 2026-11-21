@@ -15,14 +15,18 @@
 <div class="field"><label for="provider">Conversation service</label><select id="provider">
 <option value="gemini">Google Gemini</option>
 <option value="openai">OpenAI (ChatGPT API)</option>
+<option value="compatible">OpenAI-compatible endpoint</option>
 <option value="anthropic">Anthropic Claude</option>
 <option value="xai">xAI Grok</option>
 <option value="openrouter">OpenRouter (multiple AI services)</option>
 <option value="deepseek">DeepSeek</option>
 <option value="muse">Meta Muse (Model API)</option>
-</select><p class="hint">These are official API providers, not the consumer-account send-only Pebble plugins.</p></div>
+</select><p class="hint">Select a built-in API provider or enter your own compatible endpoint.</p></div>
 </section>
 <section class="panel"><div class="panel-head"><span class="step">2</span><h2>Credentials and model</h2></div>
+<div class="field hidden" id="endpoint-wrap"><label for="endpoint">HTTPS API base URL</label>
+<input id="endpoint" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="https://provider.example/v1">
+<p class="hint">Universal AI sends prompts to this host using its Chat Completions API. Grant Pebble Internet permission for custom hosts when prompted.</p></div>
 <div class="field"><label id="key-label" for="key">API key</label><input type="password" id="key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Leave blank to keep saved key"><p id="key-state" class="hint">Loading connection status…</p></div>
 <div class="field"><label for="model">AI model</label><select id="model"></select>
 <p class="hint">Select a known model or choose a custom ID for new models. Models shown here may require account access.</p>
@@ -31,7 +35,7 @@
 <input id="custom-model" type="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="Exact model ID from provider"></div>
 <div class="actions"><button id="refresh" type="button" class="secondary">Refresh Gemini models</button></div>
 <div id="price" class="note">Pricing and model availability vary by provider and model.</div>
-<p class="hint"><a id="pricing-link" href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noopener">Current provider pricing</a>. Billing is separate from ChatGPT Plus, Google AI Pro, Claude Pro and other consumer subscriptions.</p>
+<p class="hint" id="pricing-note"><a id="pricing-link" href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noopener">Current provider pricing</a>. Billing is separate from ChatGPT Plus, Google AI Pro, Claude Pro and other consumer subscriptions.</p>
 </section>
 <section class="panel"><div class="panel-head"><span class="step">3</span><h2>Save and privacy</h2></div>
 <div class="actions"><button type="button" id="save">Save provider settings</button><button type="button" id="clear" class="secondary">Clear conversation history</button></div>
@@ -46,6 +50,7 @@
 var $=function(x){return document.getElementById(x);};
 var lists={
  gemini:['gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.1-pro-preview','gemini-2.5-flash'],
+ compatible:[],
  openai:['gpt-5-mini','gpt-5.2','gpt-4.1-mini'],
  anthropic:['claude-sonnet-4-5','claude-haiku-4-5','claude-opus-4-5'],
  xai:['grok-4-fast','grok-4'],
@@ -69,7 +74,7 @@ function modelValue(){return $('model').value==='custom'?$('custom-model').value
 function activeModel(p){
  if(models[p])return models[p];
  var saved=snapshot&&snapshot.models&&snapshot.models[p];
- return saved||((snapshot&&snapshot.providers||[]).filter(function(x){return x.id===p;})[0]||{}).default_model||lists[p][0];
+ return saved||((snapshot&&snapshot.providers||[]).filter(function(x){return x.id===p;})[0]||{}).default_model||lists[p][0]||'';
 }
 function updateCustom(){ $('custom-wrap').classList.toggle('hidden',$('model').value!=='custom'); }
 function populate(){
@@ -82,7 +87,11 @@ function populate(){
  else {picker.value='custom';$('custom-model').value=target;}
  updateCustom();
  $('refresh').classList.toggle('hidden',provider!=='gemini');
- $('pricing-link').href=pricing[provider];
+ $('endpoint-wrap').classList.toggle('hidden',provider!=='compatible');
+ $('pricing-note').classList.toggle('hidden',provider==='compatible');
+ $('price').classList.toggle('hidden',provider==='compatible');
+ if(provider==='compatible')$('endpoint').value=(snapshot&&snapshot.compatible_base)||'';
+ if(pricing[provider])$('pricing-link').href=pricing[provider];
  var ready=snapshot&&snapshot.configured_providers&&snapshot.configured_providers[provider];
  $('key-label').textContent='API key · '+$('provider').options[$('provider').selectedIndex].text;
  $('key-state').textContent=ready?'API key saved for this provider. Leave blank to retain it.':'No key saved for this provider.';
@@ -109,7 +118,7 @@ $('save').addEventListener('click',function(){
  if(provider==='muse'&&/-contributor$/.test(model)&&
     !confirm('Meta Contributor mode may use prompts and responses to train future models. Use this model anyway?'))return;
  $('save').disabled=true;status('Saving provider and model…');
- send({type:'save',provider:provider,model:model,api_key:$('key').value}).then(function(r){
+ send({type:'save',provider:provider,model:model,api_key:$('key').value,base_url:$('endpoint').value}).then(function(r){
   if(!r.ok)throw Error(r.error||'Save failed');
   models[provider]=model;provider=r.provider||provider;
   $('provider').value=provider;status('Saved. '+r.provider_name+' · '+r.model+'.','ok');
