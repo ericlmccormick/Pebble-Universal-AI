@@ -19,4 +19,6 @@ assert.match(html,/dev\.meta\.ai\/docs\/pricing-rate-limits/);
 assert.match(html,/contributor\$/i);
 assert.match(html,/send_message/);
 assert.match(html,/get_message/);
+assert.match(html,/<option value="compatible">OpenAI-compatible endpoint/);
+assert.match(html,/<input id="endpoint" type="url"/);
 console.log('PASS: standalone plugin settings layout');

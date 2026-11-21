@@ -163,6 +163,7 @@ var PROVIDERS={
   xai:{label:'xAI Grok',defaultModel:'grok-4-fast',domain:'api.x.ai'},
   openrouter:{label:'OpenRouter',defaultModel:'openai/gpt-5-mini',domain:'openrouter.ai'},
   deepseek:{label:'DeepSeek',defaultModel:'deepseek-chat',domain:'api.deepseek.com'},
+  compatible:{label:'OpenAI-compatible endpoint',defaultModel:''},
   muse:{label:'Meta Muse',defaultModel:'muse-spark-1.3',domain:'api.meta.ai'}
 };
 function currentProvider(){
@@ -182,7 +183,24 @@ function validGenericModel(model){
     /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(model);
 }
 function keyId(provider){return provider==='gemini'?KEY:'ai_conversation_api_key_v1_'+provider;}
-async function providerReady(provider){return !!(await Pebble.secureStorage.getItem(keyId(provider)));}
+function compatibleBase(value) {
+  if (typeof value !== 'string' || value.length > 250) return '';
+  var match = /^https:\/\/([a-z\d-]+(?:\.[a-z\d-]+)+)(?::([1-9]\d{0,4}))?(\/[a-z\d_./~-]*)?\/?$/i.exec(value.trim());
+  if (!match || Number(match[2]) > 65535) return '';
+  var path = (match[3] || '/v1').replace(/\/+$/, '') || '/v1';
+  if (/\/\/|\/(?:\.|\.\.)(?:\/|$)|\/chat\/completions$/i.test(path)) return '';
+  return 'https://' + match[1].toLowerCase() + (match[2] ? ':' + match[2] : '') + path;
+}
+async function compatibleConfig() {
+  try {
+    var config = JSON.parse(await Pebble.secureStorage.getItem(keyId('compatible')) || 'null');
+    return config && compatibleBase(config.base) && config.key ? config : null;
+  } catch (e) { return null; }
+}
+async function providerReady(provider){
+  return provider==='compatible' ? !!(await compatibleConfig()) :
+    !!(await Pebble.secureStorage.getItem(keyId(provider)));
+}
 async function publicConfig(){
   var provider=currentProvider(),keys={},models=configuredModels();
   var names=Object.keys(PROVIDERS);
@@ -306,7 +324,7 @@ function trimUniversalTurns(turns){
   while(JSON.stringify(out).length>8500)out.shift();
   return out;
 }
-function requestFor(provider,model,system,turns){
+function requestFor(provider,model,system,turns,base){
   var headers={'Content-Type':'application/json'},url,body;
   if(provider==='gemini'){
     url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
@@ -327,7 +345,8 @@ function requestFor(provider,model,system,turns){
     body={model:model,max_completion_tokens:1200,
       messages:[{role:'developer',content:system}].concat(turns)};
   }else{
-    url=provider==='xai'?'https://api.x.ai/v1/chat/completions':
+    url=provider==='compatible'?base+'/chat/completions':
+      provider==='xai'?'https://api.x.ai/v1/chat/completions':
       provider==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':
       'https://api.deepseek.com/chat/completions';
     body={model:model,max_tokens:800,messages:[{role:'system',content:system}].concat(turns)};
@@ -340,14 +359,16 @@ function statusCode(code){
   if(code===400||code===404||code===422)return 'INVALID_ARGS';
   return 'PLUGIN_UNAVAILABLE';
 }
-function sameRequest(r,args,p,model){
-  return r.text===args.text&&r.provider===p&&r.model===model&&
+function sameRequest(r,args,p,model,base){
+  return (r.base||null)===(base||null) && r.text===args.text&&r.provider===p&&r.model===model&&
     (r.requested_conversation_id||null)===(args.conversation_id||null)&&
     (r.instructions||'')===(args.instructions||'');
 }
 async function sendUniversal(args){
   args=args||{};
   var p=currentProvider(),model=selectedModel(p);
+  var custom=p==='compatible'?await compatibleConfig():null;
+  var base=custom&&custom.base;
   if(typeof args.text!=='string'||!args.text.trim()||args.text.length>16000)
     return fail('INVALID_ARGS','Provide 1-16000 characters of text.');
   if(args.instructions!==undefined&&(typeof args.instructions!=='string'||args.instructions.length>1000))
@@ -356,7 +377,7 @@ async function sendUniversal(args){
   if(!validRequestId(id))return fail('INVALID_ARGS','Invalid request_id.');
   var old=requestRecord(id);
   if(old){
-    if(!sameRequest(old,args,p,model))
+    if(!sameRequest(old,args,p,model,base))
       return fail('INVALID_ARGS','request_id already used for another message or provider.');
     if(old.result)return {ok:true,data:old.result};
     return fail('DELIVERY_UNCERTAIN','Request already submitted; check get_message. No automatic retry.');
@@ -364,14 +385,14 @@ async function sendUniversal(args){
   var conversationId=args.conversation_id||universalSessionId();
   if(!validUniversalSession(conversationId))return fail('INVALID_ARGS','Invalid conversation_id for universal protocol.');
   var session=universalSession(conversationId);
-  if(session&&(session.provider!==p||session.model!==model))
+  if(session&&(session.provider!==p||session.model!==model||(session.base||null)!==(base||null)))
     return fail('INVALID_ARGS','Conversation belongs to another provider/model; start a new conversation.');
-  var token=await Pebble.secureStorage.getItem(keyId(p));
+  var token=p==='compatible'?(custom&&custom.key):await Pebble.secureStorage.getItem(keyId(p));
   if(!token)return fail('AUTH_REQUIRED','Configure the selected AI provider in plugin settings.');
   // A second check closes the race during the asynchronous key lookup.
   var concurrent=requestRecord(id);
   if(concurrent){
-    if(!sameRequest(concurrent,args,p,model))
+    if(!sameRequest(concurrent,args,p,model,base))
       return fail('INVALID_ARGS','request_id already used for different message, session or instructions.');
     if(concurrent.result)return {ok:true,data:concurrent.result};
     return fail('DELIVERY_UNCERTAIN','Request already submitted; check get_message. No automatic retry.');
@@ -380,10 +401,10 @@ async function sendUniversal(args){
   var system='You are a helpful smartwatch assistant. Reply concisely in plain text without markdown.';
   if(args.instructions)system+='\n'+args.instructions;
   var turns=trimUniversalTurns(session&&session.turns||[]).concat([{role:'user',content:args.text}]);
-  saveRequest(id,{text:args.text,provider:p,model:model,conversation_id:conversationId,
+  saveRequest(id,{text:args.text,provider:p,model:model,base:base,conversation_id:conversationId,
     requested_conversation_id:args.conversation_id||null,instructions:args.instructions||'',
     requested_at:requestedAt,status:'pending'});
-  var outbound=requestFor(p,model,system,turns);
+  var outbound=requestFor(p,model,system,turns,base);
   if(p==='gemini')outbound.headers['x-goog-api-key']=token;
   else if(p==='anthropic')outbound.headers['x-api-key']=token;
   else outbound.headers.Authorization='Bearer '+token;
@@ -391,7 +412,7 @@ async function sendUniversal(args){
     var response=await fetch(outbound.url,{method:'POST',headers:outbound.headers,body:JSON.stringify(outbound.body)});
     if(!response.ok){
       var code=statusCode(response.status);
-      var rejected={text:args.text,provider:p,model:model,status:'failed',conversation_id:conversationId,
+      var rejected={text:args.text,provider:p,model:model,base:base,status:'failed',conversation_id:conversationId,
         requested_at:requestedAt,http_status:response.status,error_code:code};
       saveRequest(id,rejected);
       return fail(code,PROVIDERS[p].label+' API HTTP '+response.status);
@@ -399,7 +420,7 @@ async function sendUniversal(args){
     var data=await response.json();
     var parsed=resultFromResponse(p,data);
     if(!parsed.text||!parsed.text.trim()){
-      saveRequest(id,{text:args.text,provider:p,model:model,status:'failed',conversation_id:conversationId,requested_at:requestedAt,error_code:'EMPTY_RESPONSE'});
+      saveRequest(id,{text:args.text,provider:p,model:model,base:base,status:'failed',conversation_id:conversationId,requested_at:requestedAt,error_code:'EMPTY_RESPONSE'});
       return fail('PLUGIN_UNAVAILABLE','The selected AI API returned no readable text.');
     }
     var originalText=parsed.text.trim(),answer=originalText.slice(0,4000),finished=isoNow();
@@ -414,12 +435,12 @@ async function sendUniversal(args){
       provider_response_id:parsed.provider_id,finish_reason:parsed.finish_reason,
       usage:parsed.usage,validation:{provider_http_ok:true,reply_text_present:true,
         request_id_unique:true,output_complete:!isIncomplete}};
-    saveRequest(id,{text:args.text,provider:p,model:model,status:result.status,result:result});
-    saveUniversalSession(conversationId,{provider:p,model:model,
+    saveRequest(id,{text:args.text,provider:p,model:model,base:base,status:result.status,result:result});
+    saveUniversalSession(conversationId,{provider:p,model:model,base:base,
       turns:trimUniversalTurns(turns.concat([{role:'assistant',content:answer}]))});
     return {ok:true,data:result};
   }catch(e){
-    saveRequest(id,{text:args.text,provider:p,model:model,status:'uncertain',conversation_id:conversationId,
+    saveRequest(id,{text:args.text,provider:p,model:model,base:base,status:'uncertain',conversation_id:conversationId,
       requested_at:requestedAt,error_code:'DELIVERY_UNCERTAIN'});
     return fail('DELIVERY_UNCERTAIN','Provider request interrupted. Do not retry automatically with a new request ID.');
   }
@@ -444,7 +465,7 @@ function getMessage(args){
 // The destination app must still be permitted to invoke THIS plugin UUID.
 var DEFAULT_AGENT_SESSION_KEY='ai_agent_default_session_v1_';
 function defaultSessionKey(provider,model){return DEFAULT_AGENT_SESSION_KEY+provider+'_'+model;}
-function resolveAgentSession(args){
+async function resolveAgentSession(args){
   var provider=currentProvider(),model=selectedModel(provider);
   var chat=args.chat_id;
   if(chat!==undefined&&chat!==null&&typeof chat!=='string')
@@ -455,7 +476,9 @@ function resolveAgentSession(args){
     if(!universalSession(chat))return fail('INVALID_ARGS','Unknown or expired chat_id. Use the default conversation or new.');
     return {ok:true,id:chat};
   }
-  var key=defaultSessionKey(provider,model),id=localStorage.getItem(key);
+  var custom=provider==='compatible'?await compatibleConfig():null;
+  var key=defaultSessionKey(provider,model)+(custom?'_'+custom.base:'');
+  var id=localStorage.getItem(key);
   if(!validUniversalSession(id)||!universalSession(id)){
     id=universalSessionId();
     localStorage.setItem(key,id);
@@ -465,7 +488,7 @@ function resolveAgentSession(args){
 async function sendToAgent(args){
   if(typeof args.message!=='string'||!args.message.trim()||args.message.length>16000)
     return fail('INVALID_ARGS','message must contain 1-16000 characters.');
-  var session=resolveAgentSession(args);
+  var session=await resolveAgentSession(args);
   if(!session.ok)return session;
   var result=await sendUniversal({text:args.message,conversation_id:session.id});
   if(!result.ok)return result;
@@ -480,9 +503,12 @@ async function sendToAgent(args){
     provider_response_id:full.provider_response_id,
     validation:full.validation,reply_type:'assistant'}};
 }
-function agentChats(){
+async function agentChats(){
   var provider=currentProvider(),model=selectedModel(provider);
-  var key=defaultSessionKey(provider,model),id=localStorage.getItem(key);
+  var custom=provider==='compatible'?await compatibleConfig():null;
+  var base=custom&&custom.base;
+  var key=defaultSessionKey(provider,model)+(base?'_'+base:'');
+  var id=localStorage.getItem(key);
   var rows=[{instanceId:'default',properties:{
     name:{shortText:{text:'Default conversation'}},
     title:{shortText:{text:PROVIDERS[provider].label+' · '+model}}
@@ -493,7 +519,7 @@ function agentChats(){
   if(!Array.isArray(ids))ids=[];
   ids.slice().reverse().forEach(function(key){
     var sid=key.slice(SESSION_PREFIX.length),record=universalSession(sid);
-    if(!record||record.provider!==provider||record.model!==model||seen[sid])return;
+    if(!record||record.provider!==provider||record.model!==model||(record.base||null)!==(base||null)||seen[sid])return;
     seen[sid]=true;
     rows.push({instanceId:sid,properties:{name:{shortText:{text:'Conversation '+sid.slice(-6)}},
       title:{shortText:{text:PROVIDERS[provider].label+' · '+model}}}});
@@ -504,7 +530,7 @@ function agentChats(){
 Pebble.registerSourceHandler(async function(request,respond){
   if(request.category&&request.category!=='agent'){respond.error('INVALID_REQUEST','Unsupported agent category');return;}
   if(request.item==='chats'){
-    respond.data({validUntilMs:Date.now()+60000,instances:agentChats()});return;
+    respond.data({validUntilMs:Date.now()+60000,instances:await agentChats()});return;
   }
   if(request.item!=='configured'){respond.error('INVALID_REQUEST','Unknown agent source');return;}
   var publicSettings=await publicConfig();
@@ -543,7 +569,8 @@ Pebble.registerActionHandler(async function(request,respond){
 Pebble.registerConfigHandler(async function(message,respond){
   var m=message||{};
   if(m.type==='status'){
-    respond(Object.assign({ok:true},await publicConfig()));return;
+    var compatible=await compatibleConfig();
+    respond(Object.assign({ok:true,compatible_base:compatible?compatible.base:''},await publicConfig()));return;
   }
   if(m.type==='models'){
     var listed=await listModels(m.api_key);
@@ -555,8 +582,17 @@ Pebble.registerConfigHandler(async function(message,respond){
     if(!PROVIDERS[m.provider]){respond({ok:false,error:'Unknown provider.'});return;}
     if(!validGenericModel(m.model)){respond({ok:false,error:'Enter a valid model ID.'});return;}
     var chosenKey=keyId(m.provider),newKey=typeof m.api_key==='string'?m.api_key.trim():'';
-    if(newKey)await Pebble.secureStorage.setItem(chosenKey,newKey);
-    if(!(await Pebble.secureStorage.getItem(chosenKey))){respond({ok:false,error:'Provide an API key for '+m.provider});return;}
+    if(m.provider==='compatible'){
+      var base=compatibleBase(m.base_url);
+      if(!base){respond({ok:false,error:'Enter an HTTPS API base URL such as https://provider.example/v1.'});return;}
+      var previous=await compatibleConfig();
+      var token=newKey||(previous&&previous.base===base&&previous.key);
+      if(!token){respond({ok:false,error:'Enter an API key for this endpoint.'});return;}
+      await Pebble.secureStorage.setItem(chosenKey,JSON.stringify({base:base,key:token}));
+    }else{
+      if(newKey)await Pebble.secureStorage.setItem(chosenKey,newKey);
+      if(!(await Pebble.secureStorage.getItem(chosenKey))){respond({ok:false,error:'Provide an API key for '+m.provider});return;}
+    }
     var models=configuredModels();models[m.provider]=m.model;
     localStorage.setItem(MODELS_KEY,JSON.stringify(models));
     localStorage.setItem(PROVIDER_KEY,m.provider);

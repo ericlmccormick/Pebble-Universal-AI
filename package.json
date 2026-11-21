@@ -23,6 +23,11 @@
             "api.meta.ai"
           ]
         }
+      },
+      {
+        "name": "Internet",
+        "reason": "Send prompts to your custom AI endpoint",
+        "required": false
       }
     ],
     "plugin": {
